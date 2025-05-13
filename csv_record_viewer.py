@@ -2,6 +2,7 @@
 import wx
 import csv
 import os
+import json
 
 class RecordViewerFrame(wx.Frame):
     def __init__(self, parent, title):
@@ -16,6 +17,14 @@ class RecordViewerFrame(wx.Frame):
         self.records = []
         self.current_record_idx = 0
         
+        # Initialize recent files list
+        self.recent_files = []
+        self.max_recent_files = 5  # Maximum number of recent files to track
+        self.config_file = os.path.join(os.path.expanduser("~"), ".csv-config")
+        
+        # Load recent files from config
+        self.load_recent_files()
+        
         self.setup_ui()
         self.Centre()
         self.create_menu()
@@ -29,16 +38,30 @@ class RecordViewerFrame(wx.Frame):
         self.panel = wx.Panel(self)
         self.main_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # Title
+        # Header panel with title and version
+        header_panel = wx.Panel(self.panel)
+        header_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Title on left
         title_font = wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
-        self.title_text = wx.StaticText(self.panel, label="CSV Record Viewer")
+        self.title_text = wx.StaticText(header_panel, label="CSV Record Viewer")
         self.title_text.SetFont(title_font)
-        self.main_sizer.Add(self.title_text, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+        header_sizer.Add(self.title_text, 1, wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        
+        # Version on right
+        version_font = wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        version_text = wx.StaticText(header_panel, label="Ver 0.1")
+        version_text.SetFont(version_font)
+        version_text.SetForegroundColour(wx.Colour(128, 128, 128))  # Subdued gray color
+        header_sizer.Add(version_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        
+        header_panel.SetSizer(header_sizer)
+        self.main_sizer.Add(header_panel, 0, wx.EXPAND | wx.ALL, 10)
         
         # Instructions
         instructions = wx.StaticText(
             self.panel, 
-            label="Use ← and → arrow keys to navigate through records"
+            label="Use \u2190 and \u2192 arrow keys to navigate through records"
         )
         self.main_sizer.Add(instructions, 0, wx.ALIGN_CENTER | wx.BOTTOM, 20)
         
@@ -77,12 +100,12 @@ class RecordViewerFrame(wx.Frame):
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Previous record button
-        self.prev_btn = wx.Button(btn_panel, label="← Previous")
+        self.prev_btn = wx.Button(btn_panel, label="\u2190 Previous")
         self.prev_btn.Bind(wx.EVT_BUTTON, self.on_previous)
         btn_sizer.Add(self.prev_btn, 1, wx.RIGHT, 5)
         
         # Next record button
-        self.next_btn = wx.Button(btn_panel, label="Next →")
+        self.next_btn = wx.Button(btn_panel, label="Next \u2192")
         self.next_btn.Bind(wx.EVT_BUTTON, self.on_next)
         btn_sizer.Add(self.next_btn, 1, wx.LEFT, 5)
         
@@ -101,6 +124,14 @@ class RecordViewerFrame(wx.Frame):
         # File menu
         file_menu = wx.Menu()
         open_item = file_menu.Append(wx.ID_OPEN, "&Open\tCtrl+O", "Open a CSV file")
+        
+        # Add Recent Files submenu
+        self.recent_menu = wx.Menu()
+        file_menu.AppendSubMenu(self.recent_menu, "&Recent Files", "Recently opened CSV files")
+        self.update_recent_files_menu()
+        
+        # Add separator and exit item
+        file_menu.AppendSeparator()
         exit_item = file_menu.Append(wx.ID_EXIT, "E&xit\tAlt+F4", "Exit the application")
         
         menu_bar.Append(file_menu, "&File")
@@ -110,6 +141,85 @@ class RecordViewerFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_open, open_item)
         self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
     
+    def update_recent_files_menu(self):
+        """Update the Recent Files submenu with the current list of recent files"""
+        # Clear existing items
+        for item in self.recent_menu.GetMenuItems():
+            self.recent_menu.Remove(item.GetId())
+            self.Unbind(wx.EVT_MENU, id=item.GetId())
+        
+        # Add recent files to menu
+        if not self.recent_files:
+            # Add a disabled "No Recent Files" item
+            no_recent = self.recent_menu.Append(wx.ID_ANY, "No Recent Files", "")
+            no_recent.Enable(False)
+        else:
+            # Add each recent file with its full path as data
+            for i, file_path in enumerate(self.recent_files):
+                # Use the basename for display, but store full path
+                file_name = os.path.basename(file_path)
+                menu_item = self.recent_menu.Append(wx.ID_ANY, f"{i+1}. {file_name}", file_path)
+                # Bind event handler for this menu item
+                self.Bind(wx.EVT_MENU, lambda evt, path=file_path: self.on_recent_file(evt, path), menu_item)
+    
+    def on_recent_file(self, event, file_path):
+        """Handler for clicking on a recent file menu item"""
+        if os.path.exists(file_path):
+            self.load_csv_file(file_path)
+        else:
+            # File no longer exists, remove from recent files
+            wx.MessageBox(f"File not found: {file_path}", "Error", wx.OK | wx.ICON_ERROR)
+            self.recent_files.remove(file_path)
+            self.save_recent_files()
+            self.update_recent_files_menu()
+    
+    def add_to_recent_files(self, file_path):
+        """Add a file to the recent files list"""
+        # Convert to absolute path
+        file_path = os.path.abspath(file_path)
+        
+        # Remove if already in list
+        if file_path in self.recent_files:
+            self.recent_files.remove(file_path)
+        
+        # Add to beginning of list
+        self.recent_files.insert(0, file_path)
+        
+        # Trim list to max size
+        self.recent_files = self.recent_files[:self.max_recent_files]
+        
+        # Save to config file
+        self.save_recent_files()
+        
+        # Update menu
+        self.update_recent_files_menu()
+    
+    def load_recent_files(self):
+        """Load recent files list from config file"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    self.recent_files = config.get('recent_files', [])
+                    
+                    # Verify files still exist and remove any that don't
+                    valid_files = [f for f in self.recent_files if os.path.exists(f)]
+                    if len(valid_files) != len(self.recent_files):
+                        self.recent_files = valid_files
+                        self.save_recent_files()
+        except Exception as e:
+            print(f"Error loading recent files: {str(e)}")
+            # Start with empty list if there's an error
+            self.recent_files = []
+    
+    def save_recent_files(self):
+        """Save recent files list to config file"""
+        try:
+            config = {'recent_files': self.recent_files}
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f)
+        except Exception as e:
+            print(f"Error saving recent files: {str(e)}")
     def bind_events(self):
         # Bind keyboard events for arrow key navigation - with debugging
         # Bind to the frame for better keyboard event capture
@@ -298,10 +408,12 @@ class RecordViewerFrame(wx.Frame):
                 # Update window title with filename
                 self.SetTitle(f"CSV Record Viewer - {os.path.basename(file_path)}")
                 
+                # Add file to recent files list
+                self.add_to_recent_files(file_path)
+                
         except Exception as e:
             print(f"Error loading CSV file: {str(e)}")
             wx.MessageBox(f"Error loading CSV file: {str(e)}", "Error", wx.OK | wx.ICON_ERROR)
-    
     def display_current_record(self):
         print(f"Displaying record {self.current_record_idx + 1} of {len(self.records)}")
         
@@ -430,7 +542,7 @@ class RecordViewerFrame(wx.Frame):
             
             # Calculate proper spacing between headers - ensure value is properly positioned
             first_col_width = max_label_width_percent
-            header_sizer.AddSpacer(first_col_width - field_header.GetSize().width)
+            header_sizer.AddSpacer(int(first_col_width - field_header.GetSize().width))
             
             value_position = first_col_width + 20  # Add some padding between columns
             header_sizer.Add(value_header, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
@@ -564,7 +676,6 @@ class RecordViewerFrame(wx.Frame):
         
         # Update layout
         self.update_layout()
-    
     def update_layout(self):
         """Update layout of all panels to ensure proper display"""
         # Apply layout to child panels first
@@ -732,4 +843,3 @@ if __name__ == "__main__":
             # Continue without the global event filter
         
     app.MainLoop()
-
