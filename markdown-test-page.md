@@ -91,7 +91,7 @@ $$E=mc^2$$
 <p>This paragraph contains both <strong>bold</strong> and <em>italicized</em>
  text.</p>
 
-------------------------------------------------
+---
 
 This Markdown test page demonstrates various features of the MD language,
  including:
