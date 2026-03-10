@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#--------------------git_activity.py v0.1---------------------
+#--------------------git_activity.py v0.4---------------------
 # Scans all local git repos under ~/Projects and queries GitHub
 # (including private repos) for commits in a specified date range,
 # then displays a combined, deduplicated summary grouped by repo.
@@ -8,12 +8,21 @@
 # Requires: git, gh CLI (authenticated with 'repo' scope).
 #
 # Created Mon 09 Mar 2026 by JAU
-# Modified Mon 09 Mar 2026 by JAU - added argparse --start/--end flags
-#                                    and 'today' shortcut; interactive
-#                                    mode preserved when no args given
+# Modified Mon 09 Mar 2026 by JAU v0.2 - added argparse --start/--end
+#                                         flags and 'today' shortcut;
+#                                         interactive mode preserved
+#                                         when no args given
+# Modified Mon 09 Mar 2026 by JAU v0.3 - added --project/-p filter
+#                                         (one or more repo names);
+#                                         interactive prompt added
+# Modified Tue 10 Mar 2026 by JAU v0.4 - added save-to-file prompt;
+#                                         filename built from date range
+#                                         and project filter inputs
 #--------------------------------------------------------------
 
 import argparse
+import contextlib
+import io
 import subprocess
 import json
 import os
@@ -35,6 +44,15 @@ def ask_date(prompt, default=None):
             return datetime.strptime(raw, "%Y-%m-%d").date()
         except ValueError:
             print("  Invalid format. Use YYYY-MM-DD.")
+
+
+def ask_projects(prompt):
+    """Prompt for an optional comma-separated list of project names.
+    Returns a list of names, or None (meaning all projects)."""
+    raw = input(f"{prompt} [leave blank for all]: ").strip()
+    if not raw:
+        return None
+    return [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
 
 
 def find_git_repos(root):
@@ -192,15 +210,20 @@ def format_time(timestamp_str):
                 from datetime import timezone, timedelta
                 local_tz = timezone(timedelta(hours=offset))
                 dt = dt.astimezone(local_tz)
-            return dt.strftime("%I:%M %p").lstrip("0")
+            date_part = dt.strftime("%b %d").replace(" 0", "  ")
+            time_part = dt.strftime("%I:%M %p").lstrip("0")
+            return f"{date_part}  {time_part}"
         except ValueError:
             continue
     return timestamp_str[:16]
 
 
-def print_report(merged, start, end):
+def print_report(merged, start, end, projects=None):
     """Print the activity report."""
     label = str(start) if start == end else f"{start} to {end}"
+    if projects:
+        proj_label = ", ".join(sorted(projects))
+        label = f"{label}  |  projects: {proj_label}"
     print()
     print("=" * 60)
     print(f"  Git & GitHub Activity  —  {label}")
@@ -218,7 +241,7 @@ def print_report(merged, start, end):
         print(f"{'─' * 60}")
         for c in commits:
             flag = " [GitHub only]" if c["source"] == "github-only" else ""
-            print(f"\n  {format_time(c['time'])}  {c['sha']}  {c['subject']}{flag}")
+            print(f"\n  {format_time(c['time'])}  {c['sha']}  [{c['repo_name']}]  {c['subject']}{flag}")
             for line in c["body"]:
                 if line.startswith("-"):
                     print(f"    {line}")
@@ -230,6 +253,18 @@ def print_report(merged, start, end):
     print(f"  {total} commit(s) across {len(merged)} repo(s)")
     print("=" * 60)
     print()
+
+
+def build_report_filename(start, end, projects):
+    """Build a descriptive filename from the report inputs."""
+    today = date.today().strftime("%Y-%m-%d")
+    start_str = start.strftime("%b-%d")
+    end_str = end.strftime("%b-%d")
+    date_part = start_str if start == end else f"{start_str}-to-{end_str}"
+    if projects:
+        proj_part = "-".join(sorted(projects))
+        return f"REPORT_git-activity-{date_part}_{proj_part}-{today}.txt"
+    return f"REPORT_git-activity-{date_part}-{today}.txt"
 
 
 def parse_args():
@@ -261,6 +296,10 @@ def parse_args():
             "    python3 git_activity.py --start 2026-03-01 --end 2026-03-09\n\n"
             "  Show just today's activity (non-interactive):\n"
             "    python3 git_activity.py --start today\n\n"
+            "  Show activity for a specific project:\n"
+            "    python3 git_activity.py --start today --project sandbox\n\n"
+            "  Show activity for multiple projects:\n"
+            "    python3 git_activity.py --start 2026-03-01 -p sandbox my-app\n\n"
             "Output format:\n"
             "  Grouped by repo, sorted by commit time (ascending).\n"
             "  Each commit shows: time  short-SHA  subject\n"
@@ -276,6 +315,15 @@ def parse_args():
         "--end",
         metavar="DATE",
         help="End date in YYYY-MM-DD format, or 'today' (default: same as --start)",
+    )
+    parser.add_argument(
+        "--project", "-p",
+        metavar="NAME",
+        nargs="+",
+        dest="projects",
+        help="Filter to one or more repo names (e.g. --project sandbox my-app). "
+             "Matches against both local repo directory names and GitHub repo names. "
+             "Omit to report all repos.",
     )
     return parser.parse_args()
 
@@ -316,10 +364,22 @@ def main():
     else:
         end = ask_date("End date   (YYYY-MM-DD)", default=str(start))
 
+    # Resolve project filter
+    if args.projects:
+        projects = set(args.projects)
+    elif not args.start:
+        # interactive mode — only prompt when no CLI args were given
+        projects_input = ask_projects("Project(s) to report (space or comma-separated)")
+        projects = set(projects_input) if projects_input else None
+    else:
+        projects = None
+
     print()
 
     print("Scanning local repos...", end="", flush=True)
     repos = find_git_repos(PROJECTS_ROOT)
+    if projects:
+        repos = [r for r in repos if r.name in projects]
     local_by_repo = {}
     for repo in repos:
         commits = get_local_commits(repo, start, end)
@@ -329,10 +389,25 @@ def main():
 
     print("Querying GitHub (incl. private repos)...", end="", flush=True)
     github_commits = get_github_commits(start, end)
+    if projects:
+        github_commits = {sha: c for sha, c in github_commits.items()
+                          if c["repo_name"] in projects}
     print(f" {len(github_commits)} GitHub commits found.")
 
     merged = merge_commits(local_by_repo, github_commits)
-    print_report(merged, start, end)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print_report(merged, start, end, projects)
+    output = buf.getvalue()
+    print(output, end="")
+
+    save = input("Save report to file? [y/N]: ").strip().lower()
+    if save == "y":
+        filename = build_report_filename(start, end, projects)
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(output)
+        print(f"  Report saved to {filename}")
 
 
 if __name__ == "__main__":
